@@ -1,0 +1,43 @@
+name: News Bot - Runs Every 30 Minutes
+
+# When should the robot work?
+on:
+  schedule:
+    # This magic code means "every 30 minutes"
+    # The stars mean: minute, hour, day, month, day-of-week
+    - cron: '*/30 * * * *'
+  
+  # Also let us run it manually if we want to test
+  workflow_dispatch:
+
+# What should the robot do?
+jobs:
+  fetch-news:
+    runs-on: ubuntu-latest  # Use a Linux computer in the cloud
+    
+    steps:
+    # Step 1: Get your code
+    - name: Get my code from GitHub
+      uses: actions/checkout@v4
+    
+    # Step 2: Set up Python (like installing Python on the computer)
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    # Step 3: Install the helpers your code needs
+    - name: Install required packages
+      run: |
+        pip install requests notion-client
+    
+    # Step 4: Run your news bot!
+    - name: Run the news fetcher
+      env:
+        # These are your secret API keys (we'll add them later)
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        GNEWS_API_KEY: ${{ secrets.GNEWS_API_KEY }}
+        MEDIASTACK_API_KEY: ${{ secrets.MEDIASTACK_API_KEY }}
+        CURRENTS_API_KEY: ${{ secrets.CURRENTS_API_KEY }}
+      run: python news_aggregator.py
