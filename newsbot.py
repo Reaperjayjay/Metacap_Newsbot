@@ -128,10 +128,33 @@ class NotionManager:
     def ensure_database_properties(self) -> bool:
         """Ensure all required properties exist in the Notion database."""
         try:
+            # FIXED: Changed Source and Category to select properties with default options
             required_properties = {
-                NOTION_PROPERTIES['source']: {"rich_text": {}},
+                NOTION_PROPERTIES['source']: {
+                    "select": {
+                        "options": [
+                            {"name": "GNews", "color": "blue"},
+                            {"name": "MediaStack", "color": "green"}, 
+                            {"name": "Currents", "color": "orange"},
+                            {"name": "Manual", "color": "gray"},
+                            {"name": "Unknown", "color": "default"}
+                        ]
+                    }
+                },
                 NOTION_PROPERTIES['url']: {"url": {}},
-                NOTION_PROPERTIES['category']: {"rich_text": {}},
+                NOTION_PROPERTIES['category']: {
+                    "select": {
+                        "options": [
+                            {"name": "General", "color": "default"},
+                            {"name": "Sports", "color": "green"},
+                            {"name": "Politics", "color": "red"},
+                            {"name": "Business", "color": "blue"},
+                            {"name": "Technology", "color": "purple"},
+                            {"name": "Entertainment", "color": "pink"},
+                            {"name": "Health", "color": "yellow"}
+                        ]
+                    }
+                },
                 NOTION_PROPERTIES['published_at']: {"date": {}},
                 NOTION_PROPERTIES['added_at']: {"date": {}}
             }
@@ -248,18 +271,22 @@ class NotionManager:
         """Create a new page in Notion database."""
         current_time = datetime.now(timezone.utc).isoformat()
         
+        # SAFETY: Ensure source and category exist in select options, fallback if not
+        safe_source = self._validate_select_option(article.source, "source")
+        safe_category = self._validate_select_option(article.category, "category")
+        
         properties = {
             NOTION_PROPERTIES['headline']: {
                 "title": [{"text": {"content": article.title}}]
             },
             NOTION_PROPERTIES['source']: {
-                "rich_text": [{"text": {"content": article.source}}]
+                "select": {"name": safe_source}
             },
             NOTION_PROPERTIES['url']: {
                 "url": article.url
             },
             NOTION_PROPERTIES['category']: {
-                "rich_text": [{"text": {"content": article.category}}]
+                "select": {"name": safe_category}
             },
             NOTION_PROPERTIES['published_at']: {
                 "date": {"start": article.published_at}
@@ -273,6 +300,19 @@ class NotionManager:
             parent={"database_id": self.database_id},
             properties=properties
         )
+    
+    def _validate_select_option(self, value: str, field_type: str) -> str:
+        """Validate that select option exists, return safe fallback if not."""
+        # Define valid options for each field
+        valid_sources = {"GNews", "MediaStack", "Currents", "Manual", "Unknown"}
+        valid_categories = {"General", "Sports", "Politics", "Business", "Technology", "Entertainment", "Health"}
+        
+        if field_type == "source":
+            return value if value in valid_sources else "Unknown"
+        elif field_type == "category":
+            return value if value in valid_categories else "General"
+        else:
+            return value
 
 # ===============================================
 # NEWS API CLIENTS
@@ -324,7 +364,7 @@ class GNewsClient(NewsAPIClient):
             try:
                 article = NewsArticle(
                     title=item.get("title", "No Title"),
-                    source=self._extract_source(item.get("source", {})),
+                    source="GNews",  # FIXED: Use consistent source name that matches select options
                     url=item.get("url", ""),
                     category="General",  # GNews doesn't provide categories
                     published_at=item.get("publishedAt")
@@ -366,11 +406,14 @@ class MediaStackClient(NewsAPIClient):
         articles = []
         for item in data.get("data", []):
             try:
+                # FIXED: Map category to valid select options and use consistent source name
+                category = self._map_category(item.get("category", "General"))
+                
                 article = NewsArticle(
                     title=item.get("title", "No Title"),
-                    source=str(item.get("source", "Unknown")),
+                    source="MediaStack",  # FIXED: Use consistent source name
                     url=item.get("url", ""),
-                    category=item.get("category", "General"),
+                    category=category,
                     published_at=item.get("published_at")
                 )
                 articles.append(article)
@@ -380,6 +423,19 @@ class MediaStackClient(NewsAPIClient):
         
         self.logger.info(f"✅ MediaStack: Fetched {len(articles)} articles")
         return articles
+    
+    def _map_category(self, category: str) -> str:
+        """Map API category to Notion select options."""
+        category_mapping = {
+            "sports": "Sports",
+            "politics": "Politics", 
+            "business": "Business",
+            "technology": "Technology",
+            "tech": "Technology",
+            "entertainment": "Entertainment",
+            "health": "Health"
+        }
+        return category_mapping.get(category.lower(), "General")
 
 class CurrentsClient(NewsAPIClient):
     """Client for Currents API."""
@@ -404,14 +460,14 @@ class CurrentsClient(NewsAPIClient):
         articles = []
         for item in data.get("news", []):
             try:
-                # Use author first, then source
-                source = item.get("author") or str(item.get("source", "Unknown"))
+                # FIXED: Map category to valid select options and use consistent source name
+                category = self._map_category(item.get("category", "General"))
                 
                 article = NewsArticle(
                     title=item.get("title", "No Title"),
-                    source=source,
+                    source="Currents",  # FIXED: Use consistent source name
                     url=item.get("url", ""),
-                    category=item.get("category", "General"),
+                    category=category,
                     published_at=item.get("published")
                 )
                 articles.append(article)
@@ -421,6 +477,22 @@ class CurrentsClient(NewsAPIClient):
         
         self.logger.info(f"✅ Currents: Fetched {len(articles)} articles")
         return articles
+    
+    def _map_category(self, category: str) -> str:
+        """Map API category to Notion select options."""
+        if not category:
+            return "General"
+        
+        category_mapping = {
+            "sports": "Sports",
+            "politics": "Politics", 
+            "business": "Business",
+            "technology": "Technology",
+            "tech": "Technology",
+            "entertainment": "Entertainment",
+            "health": "Health"
+        }
+        return category_mapping.get(category.lower(), "General")
 
 # ===============================================
 # NEWS AGGREGATOR
@@ -510,61 +582,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# ===============================================
-# FUTURE ENHANCEMENT SUGGESTIONS
-# ===============================================
-
-"""
-OPTIONAL ENHANCEMENTS FOR PRODUCTION USE:
-
-1. ENVIRONMENT VARIABLES:
-   - Move API keys to environment variables or config file
-   - Use python-dotenv for local development
-
-2. DATABASE OPTIMIZATION:
-   - Add database indexing on headline field
-   - Implement archiving for old articles (> 30 days)
-   - Add category-based Notion database views
-
-3. CLOUD DEPLOYMENT:
-   - Deploy on AWS Lambda with CloudWatch Events (cron)
-   - Use Azure Functions with Timer Triggers
-   - Deploy on Google Cloud Functions with Cloud Scheduler
-
-4. MONITORING & ALERTING:
-   - Integrate with Sentry for error tracking
-   - Add health check endpoints
-   - Implement Slack/Discord notifications for failures
-
-5. DATA ENRICHMENT:
-   - Add sentiment analysis using TextBlob or VADER
-   - Implement article summarization with OpenAI API
-   - Add image extraction from articles
-
-6. PERFORMANCE IMPROVEMENTS:
-   - Implement async/await for concurrent API calls
-   - Add caching layer with Redis
-   - Batch Notion operations for better performance
-
-7. CONFIGURATION MANAGEMENT:
-   - Add YAML/JSON configuration files
-   - Implement feature flags
-   - Add environment-specific configurations
-
-8. TESTING & RELIABILITY:
-   - Add comprehensive unit tests
-   - Implement integration tests with mock APIs
-   - Add automated deployment pipeline
-
-Usage Examples:
---------------
-# Run once
-python news_aggregator.py
-
-# Schedule with cron (Linux/Mac)
-# Add to crontab: */30 * * * * /usr/bin/python3 /path/to/news_aggregator.py
-
-# Schedule with Windows Task Scheduler
-# Create task pointing to: python.exe /path/to/news_aggregator.py
-"""
