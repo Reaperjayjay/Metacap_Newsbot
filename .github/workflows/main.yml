@@ -40,4 +40,4 @@ jobs:
         GNEWS_API_KEY: ${{ secrets.GNEWS_API_KEY }}
         MEDIASTACK_API_KEY: ${{ secrets.MEDIASTACK_API_KEY }}
         CURRENTS_API_KEY: ${{ secrets.CURRENTS_API_KEY }}
-      run: python news_aggregator.py
+      run: python newsbot.py
