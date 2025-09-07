@@ -32,12 +32,14 @@ import sys
 # CONFIGURATION & CONSTANTS
 # ===============================================
 
-# API Configuration
-NOTION_TOKEN = "ntn_v50193920684b9M32Pr8lVSz4BH97YIePN01WdXO0TS39A"
-DATABASE_ID = "26612b2dd84480c9ae0cd716d42c4944"
-GNEWS_API_KEY = "e6ab131a38240a286eeb29bd2704d7cc"
-MEDIASTACK_API_KEY = "611bb902ac4ab791ac8e2e504b5586f2"
-CURRENTS_API_KEY = "c4TwqKy9N7Yx6iMg-orThtFtqPSz6U6pX3ttnsVVVmf4Szg4"
+# API Configuration - Get from environment variables (secrets)
+import os
+
+NOTION_TOKEN = os.getenv('NOTION_TOKEN', "ntn_v50193920684b9M32Pr8lVSz4BH97YIePN01WdXO0TS39A")
+DATABASE_ID = os.getenv('DATABASE_ID', "26612b2dd84480c9ae0cd716d42c4944")  
+GNEWS_API_KEY = os.getenv('GNEWS_API_KEY', "e6ab131a38240a286eeb29bd2704d7cc")
+MEDIASTACK_API_KEY = os.getenv('MEDIASTACK_API_KEY', "611bb902ac4ab791ac8e2e504b5586f2")
+CURRENTS_API_KEY = os.getenv('CURRENTS_API_KEY', "c4TwqKy9N7Yx6iMg-orThtFtqPSz6U6pX3ttnsVVVmf4Szg4")
 
 # Request Configuration
 REQUEST_TIMEOUT = 30  # seconds
