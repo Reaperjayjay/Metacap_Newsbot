@@ -1,52 +1,41 @@
 #!/usr/bin/env python3
 """
-Professional News Aggregator
-============================
+News Aggregator Tool
+====================
 
-A robust news aggregation script that fetches articles from multiple APIs
-(GNews, MediaStack, Currents) and pushes them to a Notion database.
+A news aggregation script that fetches articles from multiple APIs
+and pushes them to a Notion database with automatic cleanup.
 
-Features:
-- Multi-API news fetching with error resilience
-- Duplicate prevention based on headlines
-- Comprehensive error handling and logging
-- UTC timestamp management
-- Modular architecture for easy extension
-
-Author: Professional Python Engineer
-Version: 2.0.0
+Version: 2.1.0
 Python: 3.11+
 """
 
 import requests
 from notion_client import Client
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import time
 import logging
 from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass
 from urllib.parse import urlparse
 import sys
-
-# ===============================================
-# CONFIGURATION & CONSTANTS
-# ===============================================
-
-# API Configuration - Get from environment variables (secrets)
 import os
 
+# Configuration
 NOTION_TOKEN = os.getenv('NOTION_TOKEN', "ntn_v50193920684b9M32Pr8lVSz4BH97YIePN01WdXO0TS39A")
 DATABASE_ID = os.getenv('DATABASE_ID', "26612b2dd84480c9ae0cd716d42c4944")  
 GNEWS_API_KEY = os.getenv('GNEWS_API_KEY', "e6ab131a38240a286eeb29bd2704d7cc")
 MEDIASTACK_API_KEY = os.getenv('MEDIASTACK_API_KEY', "611bb902ac4ab791ac8e2e504b5586f2")
 CURRENTS_API_KEY = os.getenv('CURRENTS_API_KEY', "c4TwqKy9N7Yx6iMg-orThtFtqPSz6U6pX3ttnsVVVmf4Szg4")
 
-# Request Configuration
-REQUEST_TIMEOUT = 30  # seconds
-RATE_LIMIT_DELAY = 0.1  # seconds between Notion API calls
-MAX_ARTICLES_PER_API = 50  # limit per API to avoid overwhelming
+# Settings
+REQUEST_TIMEOUT = 30
+RATE_LIMIT_DELAY = 0.1
+MAX_ARTICLES_PER_API = 50
+ARTICLE_RETENTION_DAYS = 3
+ENABLE_AUTO_DELETE = True
 
-# Notion Property Names
+# Database field names
 NOTION_PROPERTIES = {
     'headline': 'Headline',
     'source': 'Source',
@@ -56,12 +45,8 @@ NOTION_PROPERTIES = {
     'added_at': 'Added At'
 }
 
-# ===============================================
-# LOGGING SETUP
-# ===============================================
-
 def setup_logging() -> logging.Logger:
-    """Configure logging with proper formatting."""
+    """Setup basic logging."""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -70,13 +55,9 @@ def setup_logging() -> logging.Logger:
     logger = logging.getLogger(__name__)
     return logger
 
-# ===============================================
-# DATA MODELS
-# ===============================================
-
 @dataclass
 class NewsArticle:
-    """Data class for standardized news article representation."""
+    """Represents a news article."""
     title: str
     source: str
     url: str
@@ -84,19 +65,18 @@ class NewsArticle:
     published_at: Optional[str] = None
     
     def __post_init__(self):
-        """Validate and normalize article data."""
+        """Clean up article data."""
         self.title = self.title.strip() if self.title else "No Title"
         self.source = self.source.strip() if self.source else "Unknown"
         self.url = self.url.strip() if self.url else ""
         self.category = self.category.strip() if self.category else "General"
         
-        # Ensure published_at is in proper ISO format
         if not self.published_at:
             self.published_at = datetime.now(timezone.utc).isoformat()
     
     @property
     def is_valid(self) -> bool:
-        """Check if article has minimum required data."""
+        """Check if article has required data."""
         return (
             self.title and 
             self.title != "No Title" and
@@ -105,19 +85,15 @@ class NewsArticle:
         )
     
     def _is_valid_url(self, url: str) -> bool:
-        """Validate URL format."""
+        """Check if URL is properly formatted."""
         try:
             result = urlparse(url)
             return all([result.scheme, result.netloc])
         except Exception:
             return False
 
-# ===============================================
-# NOTION DATABASE MANAGER
-# ===============================================
-
 class NotionManager:
-    """Handles all Notion database operations."""
+    """Handles Notion database operations."""
     
     def __init__(self, token: str, database_id: str, logger: logging.Logger):
         self.client = Client(auth=token)
@@ -125,10 +101,9 @@ class NotionManager:
         self.logger = logger
         self._existing_titles: Optional[Set[str]] = None
     
-    def ensure_database_properties(self) -> bool:
-        """Ensure all required properties exist in the Notion database."""
+    def setup_database(self) -> bool:
+        """Make sure database has all needed properties."""
         try:
-            # FIXED: Changed Source and Category to select properties with default options
             required_properties = {
                 NOTION_PROPERTIES['source']: {
                     "select": {
@@ -172,18 +147,18 @@ class NotionManager:
                     self.database_id,
                     properties=missing_properties
                 )
-                self.logger.info(f"✅ Added missing properties: {', '.join(missing_properties.keys())}")
+                self.logger.info(f"Added missing properties: {', '.join(missing_properties.keys())}")
             else:
-                self.logger.info("✅ All required properties already exist")
+                self.logger.info("All required properties exist")
             
             return True
             
         except Exception as e:
-            self.logger.error(f"❌ Failed to ensure database properties: {e}")
+            self.logger.error(f"Failed to setup database properties: {e}")
             return False
     
     def get_existing_headlines(self) -> Set[str]:
-        """Fetch all existing headlines from Notion to prevent duplicates."""
+        """Get all existing headlines to avoid duplicates."""
         if self._existing_titles is not None:
             return self._existing_titles
         
@@ -214,22 +189,133 @@ class NotionManager:
                 start_cursor = response.get("next_cursor")
             
             self._existing_titles = existing_titles
-            self.logger.info(f"📊 Found {len(existing_titles)} existing headlines")
+            self.logger.info(f"Found {len(existing_titles)} existing headlines")
             return existing_titles
             
         except Exception as e:
-            self.logger.error(f"❌ Error fetching existing headlines: {e}")
-            return set()  # Return empty set to avoid blocking new articles
+            self.logger.error(f"Error fetching existing headlines: {e}")
+            return set()
+    
+    def cleanup_old_articles(self, retention_days: int = ARTICLE_RETENTION_DAYS) -> int:
+        """Remove articles older than specified days."""
+        if not ENABLE_AUTO_DELETE:
+            self.logger.info("Auto-delete is disabled")
+            return 0
+        
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        deleted_count = 0
+        
+        self.logger.info(f"Cleaning up articles older than {retention_days} days...")
+        self.logger.info(f"Cutoff date: {cutoff_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        
+        try:
+            filter_condition = {
+                "property": NOTION_PROPERTIES['added_at'],
+                "date": {
+                    "before": cutoff_date.isoformat()
+                }
+            }
+            
+            has_more = True
+            start_cursor = None
+            
+            while has_more:
+                query_params = {
+                    "database_id": self.database_id,
+                    "filter": filter_condition
+                }
+                if start_cursor:
+                    query_params["start_cursor"] = start_cursor
+                
+                response = self.client.databases.query(**query_params)
+                pages_to_delete = response.get("results", [])
+                
+                for page in pages_to_delete:
+                    try:
+                        page_id = page["id"]
+                        
+                        # Get article info for logging
+                        title_data = page.get("properties", {}).get(
+                            NOTION_PROPERTIES['headline'], {}
+                        ).get("title", [])
+                        title = "Unknown Title"
+                        if title_data:
+                            title = title_data[0]["text"]["content"][:50]
+                        
+                        added_date_data = page.get("properties", {}).get(
+                            NOTION_PROPERTIES['added_at'], {}
+                        ).get("date", {})
+                        added_date = "Unknown Date"
+                        if added_date_data and added_date_data.get("start"):
+                            added_date = added_date_data["start"][:10]
+                        
+                        # Archive the page
+                        self.client.pages.update(page_id=page_id, archived=True)
+                        deleted_count += 1
+                        
+                        self.logger.info(f"Deleted: '{title}' (added: {added_date})")
+                        time.sleep(RATE_LIMIT_DELAY)
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error deleting page {page.get('id', 'unknown')}: {e}")
+                        continue
+                
+                has_more = response.get("has_more", False)
+                start_cursor = response.get("next_cursor")
+            
+            self.logger.info(f"Cleanup completed. Deleted {deleted_count} old articles")
+            return deleted_count
+            
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
+            return deleted_count
+    
+    def get_database_stats(self) -> Dict[str, int]:
+        """Get database statistics."""
+        try:
+            total_articles = 0
+            has_more = True
+            start_cursor = None
+            
+            while has_more:
+                query_params = {"database_id": self.database_id}
+                if start_cursor:
+                    query_params["start_cursor"] = start_cursor
+                
+                response = self.client.databases.query(**query_params)
+                total_articles += len(response.get("results", []))
+                
+                has_more = response.get("has_more", False)
+                start_cursor = response.get("next_cursor")
+            
+            # Count recent articles
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+            recent_filter = {
+                "property": NOTION_PROPERTIES['added_at'],
+                "date": {
+                    "after": yesterday.isoformat()
+                }
+            }
+            
+            recent_response = self.client.databases.query(
+                database_id=self.database_id,
+                filter=recent_filter
+            )
+            recent_articles = len(recent_response.get("results", []))
+            
+            return {
+                "total_articles": total_articles,
+                "recent_articles": recent_articles
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting database stats: {e}")
+            return {"total_articles": 0, "recent_articles": 0}
     
     def add_articles(self, articles: List[NewsArticle]) -> Tuple[int, int, int]:
-        """
-        Add articles to Notion database.
-        
-        Returns:
-            Tuple of (added_count, skipped_count, error_count)
-        """
+        """Add articles to database."""
         if not articles:
-            self.logger.warning("⚠️ No articles to add")
+            self.logger.warning("No articles to add")
             return 0, 0, 0
         
         existing_headlines = self.get_existing_headlines()
@@ -239,41 +325,37 @@ class NotionManager:
             try:
                 # Skip invalid articles
                 if not article.is_valid:
-                    self.logger.warning(f"⏩ Skipped invalid article: {article.title}")
+                    self.logger.warning(f"Skipped invalid article: {article.title}")
                     skipped_count += 1
                     continue
                 
                 # Skip duplicates
                 if article.title in existing_headlines:
-                    self.logger.info(f"⏩ Skipped duplicate: {article.title}")
+                    self.logger.info(f"Skipped duplicate: {article.title}")
                     skipped_count += 1
                     continue
                 
                 # Add to Notion
-                self._create_notion_page(article)
-                self.logger.info(f"📰 Added: {article.title}")
+                self._create_page(article)
+                self.logger.info(f"Added: {article.title}")
                 added_count += 1
                 
-                # Update local cache to prevent duplicates in same batch
                 existing_headlines.add(article.title)
-                
-                # Rate limiting
                 time.sleep(RATE_LIMIT_DELAY)
                 
             except Exception as e:
-                self.logger.error(f"❌ Error adding article '{article.title}': {e}")
+                self.logger.error(f"Error adding article '{article.title}': {e}")
                 error_count += 1
                 continue
         
         return added_count, skipped_count, error_count
     
-    def _create_notion_page(self, article: NewsArticle) -> None:
-        """Create a new page in Notion database."""
+    def _create_page(self, article: NewsArticle) -> None:
+        """Create new page in database."""
         current_time = datetime.now(timezone.utc).isoformat()
         
-        # SAFETY: Ensure source and category exist in select options, fallback if not
-        safe_source = self._validate_select_option(article.source, "source")
-        safe_category = self._validate_select_option(article.category, "category")
+        safe_source = self._validate_option(article.source, "source")
+        safe_category = self._validate_option(article.category, "category")
         
         properties = {
             NOTION_PROPERTIES['headline']: {
@@ -301,9 +383,8 @@ class NotionManager:
             properties=properties
         )
     
-    def _validate_select_option(self, value: str, field_type: str) -> str:
-        """Validate that select option exists, return safe fallback if not."""
-        # Define valid options for each field
+    def _validate_option(self, value: str, field_type: str) -> str:
+        """Make sure option exists in select field."""
         valid_sources = {"GNews", "MediaStack", "Currents", "Manual", "Unknown"}
         valid_categories = {"General", "Sports", "Politics", "Business", "Technology", "Entertainment", "Health"}
         
@@ -313,10 +394,6 @@ class NotionManager:
             return value if value in valid_categories else "General"
         else:
             return value
-
-# ===============================================
-# NEWS API CLIENTS
-# ===============================================
 
 class NewsAPIClient:
     """Base class for news API clients."""
@@ -333,30 +410,29 @@ class NewsAPIClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.Timeout:
-            self.logger.error(f"❌ {api_name}: Request timeout")
+            self.logger.error(f"{api_name}: Request timeout")
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"❌ {api_name}: Network error - {e}")
+            self.logger.error(f"{api_name}: Network error - {e}")
         except Exception as e:
-            self.logger.error(f"❌ {api_name}: Unexpected error - {e}")
+            self.logger.error(f"{api_name}: Unexpected error - {e}")
         return None
 
 class GNewsClient(NewsAPIClient):
-    """Client for GNews API.""" 
+    """GNews API client.""" 
     
     def __init__(self, api_key: str, logger: logging.Logger):
         super().__init__(logger)
         self.api_key = api_key
     
     def fetch_articles(self) -> List[NewsArticle]:
-        """Fetch articles from GNews API."""
-        # FIXED: Using correct GNews endpoint instead of NewsAPI
+        """Get articles from GNews."""
         url = f"https://gnews.io/api/v4/top-headlines?country=ng&lang=en&token={self.api_key}&max={MAX_ARTICLES_PER_API}"
         
-        self.logger.info("📡 Fetching from GNews...")
+        self.logger.info("Fetching from GNews...")
         
         data = self._make_request(url, "GNews")
         if not data or "articles" not in data:
-            self.logger.warning("⚠️ GNews: No articles in response")
+            self.logger.warning("GNews: No articles in response")
             return []
         
         articles = []
@@ -364,68 +440,61 @@ class GNewsClient(NewsAPIClient):
             try:
                 article = NewsArticle(
                     title=item.get("title", "No Title"),
-                    source="GNews",  # FIXED: Use consistent source name that matches select options
+                    source="GNews",
                     url=item.get("url", ""),
-                    category="General",  # GNews doesn't provide categories
+                    category="General",
                     published_at=item.get("publishedAt")
                 )
                 articles.append(article)
             except Exception as e:
-                self.logger.warning(f"⚠️ GNews: Error parsing article - {e}")
+                self.logger.warning(f"GNews: Error parsing article - {e}")
                 continue
         
-        self.logger.info(f"✅ GNews: Fetched {len(articles)} articles")
+        self.logger.info(f"GNews: Fetched {len(articles)} articles")
         return articles
-    
-    def _extract_source(self, source_data) -> str:
-        """Extract source name from GNews source data."""
-        if isinstance(source_data, dict):
-            return source_data.get("name", "Unknown")
-        return str(source_data) if source_data else "Unknown"
 
 class MediaStackClient(NewsAPIClient):
-    """Client for MediaStack API."""
+    """MediaStack API client."""
     
     def __init__(self, api_key: str, logger: logging.Logger):
         super().__init__(logger)
         self.api_key = api_key
     
     def fetch_articles(self) -> List[NewsArticle]:
-        """Fetch articles from MediaStack API."""
+        """Get articles from MediaStack."""
         url = (f"http://api.mediastack.com/v1/news?"
                f"access_key={self.api_key}&countries=ng&languages=en"
                f"&limit={MAX_ARTICLES_PER_API}")
         
-        self.logger.info("📡 Fetching from MediaStack...")
+        self.logger.info("Fetching from MediaStack...")
         
         data = self._make_request(url, "MediaStack")
         if not data or "data" not in data:
-            self.logger.warning("⚠️ MediaStack: No articles in response")
+            self.logger.warning("MediaStack: No articles in response")
             return []
         
         articles = []
         for item in data.get("data", []):
             try:
-                # FIXED: Map category to valid select options and use consistent source name
                 category = self._map_category(item.get("category", "General"))
                 
                 article = NewsArticle(
                     title=item.get("title", "No Title"),
-                    source="MediaStack",  # FIXED: Use consistent source name
+                    source="MediaStack",
                     url=item.get("url", ""),
                     category=category,
                     published_at=item.get("published_at")
                 )
                 articles.append(article)
             except Exception as e:
-                self.logger.warning(f"⚠️ MediaStack: Error parsing article - {e}")
+                self.logger.warning(f"MediaStack: Error parsing article - {e}")
                 continue
         
-        self.logger.info(f"✅ MediaStack: Fetched {len(articles)} articles")
+        self.logger.info(f"MediaStack: Fetched {len(articles)} articles")
         return articles
     
     def _map_category(self, category: str) -> str:
-        """Map API category to Notion select options."""
+        """Map category names."""
         category_mapping = {
             "sports": "Sports",
             "politics": "Politics", 
@@ -438,48 +507,46 @@ class MediaStackClient(NewsAPIClient):
         return category_mapping.get(category.lower(), "General")
 
 class CurrentsClient(NewsAPIClient):
-    """Client for Currents API."""
+    """Currents API client."""
     
     def __init__(self, api_key: str, logger: logging.Logger):
         super().__init__(logger)
         self.api_key = api_key
     
     def fetch_articles(self) -> List[NewsArticle]:
-        """Fetch articles from Currents API."""
-        # IMPROVED: Using region instead of keywords for better Nigerian coverage
+        """Get articles from Currents."""
         url = (f"https://api.currentsapi.services/v1/latest-news?"
                f"apiKey={self.api_key}&language=en&region=ng")
         
-        self.logger.info("📡 Fetching from Currents...")
+        self.logger.info("Fetching from Currents...")
         
         data = self._make_request(url, "Currents")
         if not data or "news" not in data:
-            self.logger.warning("⚠️ Currents: No articles in response")
+            self.logger.warning("Currents: No articles in response")
             return []
         
         articles = []
         for item in data.get("news", []):
             try:
-                # FIXED: Map category to valid select options and use consistent source name
                 category = self._map_category(item.get("category", "General"))
                 
                 article = NewsArticle(
                     title=item.get("title", "No Title"),
-                    source="Currents",  # FIXED: Use consistent source name
+                    source="Currents",
                     url=item.get("url", ""),
                     category=category,
                     published_at=item.get("published")
                 )
                 articles.append(article)
             except Exception as e:
-                self.logger.warning(f"⚠️ Currents: Error parsing article - {e}")
+                self.logger.warning(f"Currents: Error parsing article - {e}")
                 continue
         
-        self.logger.info(f"✅ Currents: Fetched {len(articles)} articles")
+        self.logger.info(f"Currents: Fetched {len(articles)} articles")
         return articles
     
     def _map_category(self, category: str) -> str:
-        """Map API category to Notion select options."""
+        """Map category names."""
         if not category:
             return "General"
         
@@ -494,18 +561,13 @@ class CurrentsClient(NewsAPIClient):
         }
         return category_mapping.get(category.lower(), "General")
 
-# ===============================================
-# NEWS AGGREGATOR
-# ===============================================
-
 class NewsAggregator:
-    """Main orchestrator for news aggregation process."""
+    """Main news aggregation handler."""
     
     def __init__(self):
         self.logger = setup_logging()
         self.notion_manager = NotionManager(NOTION_TOKEN, DATABASE_ID, self.logger)
         
-        # Initialize API clients
         self.api_clients = [
             GNewsClient(GNEWS_API_KEY, self.logger),
             MediaStackClient(MEDIASTACK_API_KEY, self.logger),
@@ -513,32 +575,42 @@ class NewsAggregator:
         ]
     
     def run(self) -> None:
-        """Execute the complete news aggregation workflow."""
-        self.logger.info("🚀 Starting Professional News Aggregator...")
+        """Run the news aggregation process."""
+        self.logger.info("Starting news aggregator...")
         
-        # Setup Notion database
-        if not self.notion_manager.ensure_database_properties():
-            self.logger.error("❌ Failed to setup Notion database. Exiting.")
+        # Setup database
+        if not self.notion_manager.setup_database():
+            self.logger.error("Failed to setup database. Exiting.")
             sys.exit(1)
         
-        # Fetch articles from all APIs
-        all_articles = self._fetch_all_articles()
+        # Get initial stats
+        initial_stats = self.notion_manager.get_database_stats()
+        self.logger.info(f"Database contains {initial_stats['total_articles']} total articles")
+        
+        # Clean up old articles
+        deleted_count = self.notion_manager.cleanup_old_articles()
+        
+        # Fetch new articles
+        all_articles = self._fetch_articles()
         
         if not all_articles:
-            self.logger.warning("⚠️ No articles were fetched from any API")
+            self.logger.warning("No articles were fetched from any API")
             return
         
-        self.logger.info(f"📊 Total articles fetched: {len(all_articles)}")
+        self.logger.info(f"Total articles fetched: {len(all_articles)}")
         
-        # Add articles to Notion
+        # Add articles to database
         added, skipped, errors = self.notion_manager.add_articles(all_articles)
         
-        # Final summary
-        self._print_summary(added, skipped, errors, len(all_articles))
-        self.logger.info("🏁 News aggregation completed!")
+        # Get final stats
+        final_stats = self.notion_manager.get_database_stats()
+        
+        # Show summary
+        self._print_summary(added, skipped, errors, len(all_articles), deleted_count, final_stats)
+        self.logger.info("News aggregation completed!")
     
-    def _fetch_all_articles(self) -> List[NewsArticle]:
-        """Fetch articles from all configured APIs."""
+    def _fetch_articles(self) -> List[NewsArticle]:
+        """Fetch articles from all APIs."""
         all_articles = []
         
         for client in self.api_clients:
@@ -547,37 +619,64 @@ class NewsAggregator:
                 all_articles.extend(articles)
             except Exception as e:
                 client_name = client.__class__.__name__
-                self.logger.error(f"❌ {client_name}: Critical error - {e}")
+                self.logger.error(f"{client_name}: Critical error - {e}")
                 continue
         
         return all_articles
     
-    def _print_summary(self, added: int, skipped: int, errors: int, total: int) -> None:
-        """Print final execution summary."""
+    def _print_summary(self, added: int, skipped: int, errors: int, total: int, 
+                      deleted: int, final_stats: Dict[str, int]) -> None:
+        """Print execution summary."""
         print("\n" + "="*60)
-        print("📊 EXECUTION SUMMARY")
+        print("EXECUTION SUMMARY")
         print("="*60)
-        print(f"📥 Total articles fetched: {total}")
-        print(f"✅ Articles added to Notion: {added}")
-        print(f"⏩ Articles skipped (duplicates/invalid): {skipped}")
-        print(f"❌ Articles with errors: {errors}")
-        print(f"📈 Success rate: {(added/(total or 1))*100:.1f}%")
+        print(f"Old articles deleted: {deleted}")
+        print(f"Total articles fetched: {total}")
+        print(f"Articles added to Notion: {added}")
+        print(f"Articles skipped (duplicates/invalid): {skipped}")
+        print(f"Articles with errors: {errors}")
+        print(f"Success rate: {(added/(total or 1))*100:.1f}%")
+        print("-"*60)
+        print(f"Total articles in database: {final_stats['total_articles']}")
+        print(f"Recent articles (24h): {final_stats['recent_articles']}")
+        print(f"Retention period: {ARTICLE_RETENTION_DAYS} days")
+        print(f"Auto-delete: {'Enabled' if ENABLE_AUTO_DELETE else 'Disabled'}")
         print("="*60)
 
-# ===============================================
-# MAIN EXECUTION
-# ===============================================
+def run_cleanup_only():
+    """Run cleanup without fetching new articles."""
+    logger = setup_logging()
+    notion_manager = NotionManager(NOTION_TOKEN, DATABASE_ID, logger)
+    
+    logger.info("Running cleanup-only mode...")
+    
+    if not notion_manager.setup_database():
+        logger.error("Failed to setup database. Exiting.")
+        sys.exit(1)
+    
+    initial_stats = notion_manager.get_database_stats()
+    logger.info(f"Database contains {initial_stats['total_articles']} total articles")
+    
+    deleted_count = notion_manager.cleanup_old_articles()
+    final_stats = notion_manager.get_database_stats()
+    
+    print(f"\nCleanup completed!")
+    print(f"Articles deleted: {deleted_count}")
+    print(f"Articles remaining: {final_stats['total_articles']}")
 
 def main():
-    """Main entry point for the news aggregator."""
+    """Main entry point."""
     try:
-        aggregator = NewsAggregator()
-        aggregator.run()
+        if len(sys.argv) > 1 and sys.argv[1] == "--cleanup-only":
+            run_cleanup_only()
+        else:
+            aggregator = NewsAggregator()
+            aggregator.run()
     except KeyboardInterrupt:
-        print("\n❌ Process interrupted by user")
+        print("\nProcess interrupted by user")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Critical error: {e}")
+        print(f"Critical error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
